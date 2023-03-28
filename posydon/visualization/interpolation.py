@@ -1,10 +1,16 @@
-""" Module to evaluate IFInterpolator class """
+""" 
+
+This module contains classes to evaluate the IFInterpolator class as well
+as the TrackInterpolator class
+
+"""
 
 __authors__ = [
-    "Philipp Moura Srivastava <philipp.msrivastava@gmail.com>"
+    "Philipp Moura Srivastava <philipp.msrivastava@northwestern.edu>"
 ]
 
-
+from posydon.interpolation.utils import set_valid
+from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -141,7 +147,6 @@ class EvaluateIFInterpolator:
         errs = self.errs[err_type].T[k_inds].T
 
         errs = errs[~np.isnan(errs).any(axis = 1)] # dropping nans
-        print(k_inds, np.nanmedian(errs, axis = 1))
 
         plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
 
@@ -253,7 +258,94 @@ class EvaluateIFInterpolator:
         pass
 
 
+
+class EvaluateTrackInterpolator:
+
+    def __init__(self, interpolator, grid):
+
+        errors = {"relative": [], "absolute": []}
+
+        ivs = np.array(grid.initial_values[interpolator.in_keys].tolist())
+
+        unique_classes = np.unique(grid.final_values["interpolation_class"])
+
+        valid_inds = set_valid(grid.final_values["interpolation_class"], ivs, unique_classes,
+            interpolator.phase == "HMS-HMS")
+
+        approxs = interpolator.test_interpolator(ivs)
+        tracks_omitted = 0
+
+        for ind, v in enumerate(valid_inds):
+            if v < 0:
+                continue
+            
+            bhist = np.array(grid[ind].binary_history[interpolator.out_keys].tolist())
+            appr = approxs[ind]
+
+            if np.isnan(np.array(appr, dtype = np.float64)).any() == True or bhist.shape[0] < 2 or appr.shape[0] < 2 or appr.T[0].min() == appr.T[0].max():
+                tracks_omitted += 1
+                continue
+
+            n_appr = (appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8)
+
+            interp = interp1d((appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8), appr.T[1:])
+
+
+            r_errs = [np.abs((interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8)) - tb[1:]) / tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8) < n_appr.max()]
+            a_errs = [np.abs(interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8)) - tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8) < n_appr.max()]
+
+            errors["relative"].append(r_errs)
+            errors["absolute"].append(a_errs)
+
+        self.errors = errors
+        self.out_keys = interpolator.out_keys
+
+        print(f"omitted {tracks_omitted} tracks")
+
+    def violin_plots(self, err_type = "relative", save_path = None):
+
+        # SHOULD WRITE BASE EVALUATION CLASS SO CODE FOR VIOLIN PLOTS CAN BE MODULARIZED
+        # THROUGH INHERITANCE
+        self.errs = []
+
+        for track_err in self.errors[err_type]:
+            self.errs.extend(track_err)
+
+
+        self.errs = np.array(np.concatenate(self.errs), dtype = np.float64)
+
+        plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
+
+        fig, axs = plt.subplots(1, 1,
+                                figsize = (24, 10),
+                                tight_layout = True)
         
+        parts = axs.violinplot(np.log10(self.errs + 1.0e-8), showmedians = True, points = 1000)
+        axs.set_title(f"Distribution of {err_type.capitalize()} Errors")
+
+        out_keys = np.delete(np.array(self.out_keys, copy = True), 0)
+        medians = [np.nanmedian(self.errs, axis = 0)] if len(out_keys) == 1 else np.nanmedian(self.errs, axis = 1)
+
+        axs.set_xticks(np.arange(1, len(out_keys) + 1), 
+            labels = [
+                f"{ec} ({(med * 100):.2f}%)" for ec, med in zip(out_keys, medians)
+            ], rotation = 20)
+
+        axs.set_ylabel("Errors in Log 10 Scale")
+        axs.grid(axis = "y")
+
+        for pc in parts["bodies"]:
+            pc.set_facecolor("#D43F3A")
+            pc.set_edgecolor("black")
+            pc.set_alpha(0.85)
+
+        plt.show()
+
+        if save_path is not None:
+            fig.save(save_path)
+
+        print(np.array(self.errs).shape)
+
 
 
 

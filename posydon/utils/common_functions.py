@@ -27,6 +27,7 @@ from scipy.interpolate import PchipInterpolator
 
 
 PATH_TO_POSYDON = os.environ.get("PATH_TO_POSYDON")
+PATH_TO_POSYDON_DATA = os.environ.get("PATH_TO_POSYDON_DATA")
 
 
 # Constants related to inferring star states
