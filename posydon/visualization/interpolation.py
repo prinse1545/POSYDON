@@ -13,6 +13,7 @@ from posydon.interpolation.utils import set_valid
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 
 class EvaluateIFInterpolator:
     """ Class that is helpful for evaluating interpolation performance
@@ -273,7 +274,10 @@ class EvaluateTrackInterpolator:
             interpolator.phase == "HMS-HMS")
 
         approxs = interpolator.test_interpolator(ivs)
+
         tracks_omitted = 0
+        self.approxs = []
+        self.gts = []
 
         for ind, v in enumerate(valid_inds):
             if v < 0:
@@ -281,6 +285,8 @@ class EvaluateTrackInterpolator:
             
             bhist = np.array(grid[ind].binary_history[interpolator.out_keys].tolist())
             appr = approxs[ind]
+            self.approxs.append(appr)
+            self.gts.append(bhist)
 
             if np.isnan(np.array(appr, dtype = np.float64)).any() == True or bhist.shape[0] < 2 or appr.shape[0] < 2 or appr.T[0].min() == appr.T[0].max():
                 tracks_omitted += 1
@@ -297,6 +303,8 @@ class EvaluateTrackInterpolator:
             errors["relative"].append(r_errs)
             errors["absolute"].append(a_errs)
 
+        self.approxs = np.array(self.approxs)
+        self.gts = np.array(self.gts)
         self.errors = errors
         self.out_keys = interpolator.out_keys
 
@@ -311,9 +319,7 @@ class EvaluateTrackInterpolator:
         for track_err in self.errors[err_type]:
             self.errs.extend(track_err)
 
-
-        self.errs = np.array(np.concatenate(self.errs), dtype = np.float64)
-
+        self.errs = np.array(self.errs, dtype = np.float64)
         plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
 
         fig, axs = plt.subplots(1, 1,
@@ -324,7 +330,7 @@ class EvaluateTrackInterpolator:
         axs.set_title(f"Distribution of {err_type.capitalize()} Errors")
 
         out_keys = np.delete(np.array(self.out_keys, copy = True), 0)
-        medians = [np.nanmedian(self.errs, axis = 0)] if len(out_keys) == 1 else np.nanmedian(self.errs, axis = 1)
+        medians = np.nanmedian(self.errs, axis = 0)
 
         axs.set_xticks(np.arange(1, len(out_keys) + 1), 
             labels = [
@@ -344,7 +350,69 @@ class EvaluateTrackInterpolator:
         if save_path is not None:
             fig.save(save_path)
 
-        print(np.array(self.errs).shape)
+    def plot_grid(self, n_samples):
+
+        samples = random.sample(list(range(len(self.gts))), n_samples)
+
+        out_keys = self.out_keys.copy()
+        out_keys.remove("age")
+
+        fig, ax = plt.subplots(len(out_keys), 1, figsize = (6, 6), constrained_layout = True)
+
+        for k, key in enumerate(out_keys):
+
+            for sample in samples:
+
+                n_gt = (self.gts[sample].T[0] - self.gts[sample].T[0].min()) / (self.gts[sample].T[0].max() - self.gts[sample].T[0].min() + 1.0e-8)
+                n_ap = (self.approxs[sample].T[0] - self.approxs[sample].T[0].min()) / (self.approxs[sample].T[0].max() - self.approxs[sample].T[0].min() + 1.0-8)
+
+                ax[k].plot(n_gt, self.gts[sample].T[k + 1], c = "b", alpha = 0.1)
+                ax[k].plot(n_ap, self.approxs[sample].T[k + 1], c = "r", alpha = 0.1)
+
+            ax[k].set_xlabel("Myr")
+            ax[k].set_ylabel(key)
+
+
+    def plot_tracks(self, inds, title):
+
+        fig, axs = plt.subplots(len(inds), len(self.out_keys) - 1, figsize = (12, 14), constrained_layout = True)
+
+        out_keys = self.out_keys.copy()
+        out_keys.remove("age")
+
+        for i, ind in enumerate(inds):
+            for k, key in enumerate(out_keys):
+                axs[i][k].plot(self.approxs[i].T[0], self.approxs[i].T[k + 1], label = "Approximation")
+                axs[i][k].plot(self.gts[i].T[0], self.gts[i].T[k + 1], label = "Ground Truth")
+                axs[i][k].legend()
+
+                if i == len(inds) - 1:
+                    axs[i][k].set_xlabel("Myr")
+
+                axs[i][k].set_ylabel(key)
+
+        fig.suptitle(title)
+
+                
+
+    def find_tracks(self, percent, margin = 0.025, err_type = "relative"):
+
+        if percent < 0.0 or percent > 1.0:
+            raise Exception("the percent argument must be between 0 and 1 inclusive")
+
+        errs = []
+        
+        for err in self.errors[err_type]:
+
+            errs.append(np.array(err).mean(axis = 0))
+
+        errs = np.array(errs).mean(axis = 1).argsort()
+
+        lo = int(len(errs) * max(percent - margin, 0.0))
+        hi = int(len(errs) * min(percent + margin, 1.0))
+
+        return errs[lo:hi]
+
 
 
 

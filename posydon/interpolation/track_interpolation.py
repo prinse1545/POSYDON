@@ -122,8 +122,14 @@ class TrackInterpolator:
             temp = []
 
             while age < 1.0:
+                tb = [age]
+                
+                if len(self.out_keys) > 2:
+                    tb.extend(interp(age))
+                else:
+                    tb.append(interp(age))
 
-                temp.append([age, interp(age)])
+                temp.append(tb)
 
                 age += dt
 
