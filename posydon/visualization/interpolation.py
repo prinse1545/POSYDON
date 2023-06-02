@@ -143,10 +143,11 @@ class EvaluateIFInterpolator:
         if keys is None:
             keys = self.out_keys
 
+        print(self.out_keys)
         k_inds = [self.out_keys.index(key) for key in keys]
         
         errs = self.errs[err_type].T[k_inds].T
-
+        print(np.isnan(errs).any(axis = 1))
         errs = errs[~np.isnan(errs).any(axis = 1)] # dropping nans
 
         plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
@@ -157,9 +158,10 @@ class EvaluateIFInterpolator:
         
         parts = axs.violinplot(np.log10(errs + 1.0e-8), showmedians = True, points = 1000)
         axs.set_title(f"Distribution of {err_type.capitalize()} Errors")
+        print(np.nanmedian(errs, axis = 0))
         axs.set_xticks(np.arange(1, len(keys) + 1), 
             labels = [
-                f"{self.__format(ec)} ({(med * 100):.2f})" for ec, med in zip(keys, np.nanmedian(errs, axis = 1))
+                f"{self.__format(ec)} ({(med * 100):.2f})" for ec, med in zip(keys, np.nanmedian(errs, axis = 0))
             ], rotation = 20)
 
         axs.set_ylabel("Errors in Log 10 Scale")
@@ -262,7 +264,7 @@ class EvaluateIFInterpolator:
 
 class EvaluateTrackInterpolator:
 
-    def __init__(self, interpolator, grid):
+    def __init__(self, interpolator, grid, rescale_y = True):
 
         errors = {"relative": [], "absolute": []}
 
@@ -273,42 +275,102 @@ class EvaluateTrackInterpolator:
         valid_inds = set_valid(grid.final_values["interpolation_class"], ivs, unique_classes,
             interpolator.phase == "HMS-HMS")
 
-        approxs = interpolator.test_interpolator(ivs)
+        # taking out systems that start in RLOF
+        valid_inds[np.where(grid.final_values["termination_flag_1"] == "forced_initial_RLO")[0]] = -1
+        valid_bool = lambda track: track.history1 is None or track.history2 is None or track.binary_history is None if interpolator.phase == "HMS-HMS" else track.history1 is None or track.binary_history is None
+        valid_inds[[ind for ind, track in enumerate(grid) if valid_bool(track)]] = -1
+
+        approxs, meta = interpolator.test_interpolator(ivs, True)
 
         tracks_omitted = 0
         self.approxs = []
+        self.neighbors = []
+        self.distances = []
         self.gts = []
+
+
+        bhist_keys = [k for k in interpolator.out_keys if k.split("_")[0] != "S1" and k.split("_")[0] != "S2"]
+        s1_keys = [k[3:] for k in interpolator.out_keys if k.split("_")[0] == "S1"]
+        s2_keys = [k[3:] for k in interpolator.out_keys if k.split("_")[0] == "S2"]
+
+        if interpolator.phase != "HMS-HMS" and len(s2_keys) > 0:
+            keys = [k for k in interpolator.out_keys if k[3:] not in s2_keys] + s1_keys
+            print("Star 2 is undefined for grids containing CO")
+        else:
+            keys = interpolator.out_keys
+
+
+        self.herror_track_count = np.zeros(len(keys) - 1)
+        self.herror_tstep_count = np.zeros(len(keys) - 1)
+        self.n_tstep = 0
 
         for ind, v in enumerate(valid_inds):
             if v < 0:
                 continue
-            
-            bhist = np.array(grid[ind].binary_history[interpolator.out_keys].tolist())
+
+            if interpolator.phase == "HMS-HMS":
+                bin_hist = np.array(grid[ind].binary_history[bhist_keys].tolist())
+                s1_hist = np.array(grid[ind].history1[s1_keys].tolist())
+                s2_hist = np.array(grid[ind].history2[s2_keys].tolist())
+
+                bhist = np.concatenate([bin_hist, s1_hist, s2_hist], axis = 1)
+            else:
+                bin_hist = np.array(grid[ind].binary_history[bhist_keys].tolist())
+                s1_hist = np.array(grid[ind].history1[s1_keys].tolist())
+
+                bhist = np.concatenate([bin_hist, s1_hist], axis = 1)
+
             appr = approxs[ind]
+
+            if rescale_y:
+
+                # rescaling y using gt max
+                y_max = bhist.max(axis = 0)[1:]
+                appr.T[1:] = ((appr.T[1:].T / appr.max(axis = 0)[1:]) * y_max).T
+
             self.approxs.append(appr)
+            self.neighbors.append(meta[ind][0])
+            self.distances.append(meta[ind][1])
             self.gts.append(bhist)
 
             if np.isnan(np.array(appr, dtype = np.float64)).any() == True or bhist.shape[0] < 2 or appr.shape[0] < 2 or appr.T[0].min() == appr.T[0].max():
                 tracks_omitted += 1
                 continue
 
+            if "period_days" in interpolator.out_keys:
+
+                pd_ind = interpolator.out_keys.index("period_days")
+
+                appr.T[pd_ind] = np.log10(appr.T[pd_ind])
+                bhist.T[pd_ind] = np.log10(bhist.T[pd_ind])
+
             n_appr = (appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8)
 
             interp = interp1d((appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8), appr.T[1:])
 
+            r_errs = np.array([np.abs((interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8)) - tb[1:]) / tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8) < n_appr.max()])
+            a_errs = np.array([np.abs(interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8)) - tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8) < n_appr.max()])
 
-            r_errs = [np.abs((interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8)) - tb[1:]) / tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8) < n_appr.max()]
-            a_errs = [np.abs(interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8)) - tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0-8) < n_appr.max()]
+
+            self.herror_track_count += (r_errs.mean(axis = 0) >= 0.1)
+            self.herror_tstep_count += (r_errs >= 0.1).sum(axis = 0)
+            self.n_tstep += bhist.shape[0]
+            
+            # removing nans causes by duplicate ages in data
+            r_errs = r_errs[~np.isnan(r_errs).any(axis=1)]
+            a_errs = a_errs[~np.isnan(a_errs).any(axis=1)]
 
             errors["relative"].append(r_errs)
             errors["absolute"].append(a_errs)
 
         self.approxs = np.array(self.approxs)
+        self.neighbors = np.array(self.neighbors)
+        self.distances = np.array(self.distances)
         self.gts = np.array(self.gts)
         self.errors = errors
-        self.out_keys = interpolator.out_keys
+        self.out_keys = keys
 
-        print(f"omitted {tracks_omitted} tracks")
+        print(f"omitted {tracks_omitted} / {len(grid)} tracks")
 
     def violin_plots(self, err_type = "relative", save_path = None):
 
@@ -320,11 +382,14 @@ class EvaluateTrackInterpolator:
             self.errs.extend(track_err)
 
         self.errs = np.array(self.errs, dtype = np.float64)
+
+        self.errs = self.errs[~np.isnan(self.errs).any(axis = 1)]
+
         plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
 
         fig, axs = plt.subplots(1, 1,
                                 figsize = (24, 10),
-                                tight_layout = True)
+                                constrained_layout = True)
         
         parts = axs.violinplot(np.log10(self.errs + 1.0e-8), showmedians = True, points = 1000)
         axs.set_title(f"Distribution of {err_type.capitalize()} Errors")
@@ -332,13 +397,16 @@ class EvaluateTrackInterpolator:
         out_keys = np.delete(np.array(self.out_keys, copy = True), 0)
         medians = np.nanmedian(self.errs, axis = 0)
 
+        herr_tracks_rate = self.herror_track_count / self.approxs.shape[0]
+        herr_tstep_rate = self.herror_tstep_count / self.n_tstep
+
         axs.set_xticks(np.arange(1, len(out_keys) + 1), 
             labels = [
-                f"{ec} ({(med * 100):.2f}%)" for ec, med in zip(out_keys, medians)
+                f"{ec} ({(med * 100):.2f}%) \n % tracks >= 0.1: {(tr * 100):.2f}% \n % timesteps >= 0.1: {(ts * 100):.2f}%" if err_type == "relative" else f"{ec} ({med:.2f})" for ec, med, tr, ts in zip(out_keys, medians, herr_tracks_rate, herr_tstep_rate)
             ], rotation = 20)
 
         axs.set_ylabel("Errors in Log 10 Scale")
-        axs.grid(axis = "y")
+        axs.grid(axis = "y", which = "both", alpha = 0.75, zorder = -100)
 
         for pc in parts["bodies"]:
             pc.set_facecolor("#D43F3A")
@@ -366,30 +434,43 @@ class EvaluateTrackInterpolator:
                 n_gt = (self.gts[sample].T[0] - self.gts[sample].T[0].min()) / (self.gts[sample].T[0].max() - self.gts[sample].T[0].min() + 1.0e-8)
                 n_ap = (self.approxs[sample].T[0] - self.approxs[sample].T[0].min()) / (self.approxs[sample].T[0].max() - self.approxs[sample].T[0].min() + 1.0-8)
 
-                ax[k].plot(n_gt, self.gts[sample].T[k + 1], c = "b", alpha = 0.1)
-                ax[k].plot(n_ap, self.approxs[sample].T[k + 1], c = "r", alpha = 0.1)
+                ax[k].plot(n_gt, self.gts[sample].T[k + 1], c = "r", alpha = 0.1)
+                ax[k].plot(n_ap, self.approxs[sample].T[k + 1], c = "b", alpha = 0.1)
 
             ax[k].set_xlabel("Myr")
             ax[k].set_ylabel(key)
 
 
-    def plot_tracks(self, inds, title):
+    def plot_tracks(self, inds, title, meta = False):
 
-        fig, axs = plt.subplots(len(inds), len(self.out_keys) - 1, figsize = (12, 14), constrained_layout = True)
+        fig, axs = plt.subplots(len(inds), len(self.out_keys) - 1, figsize = (3 * len(self.out_keys), 14), constrained_layout = True)
 
         out_keys = self.out_keys.copy()
         out_keys.remove("age")
 
+        colors = ["#1E90FF", "#2E8B57", "#808000", "#FBB117"]
+
         for i, ind in enumerate(inds):
+            print(self.errors["relative"][ind].mean(axis = 0).shape)
             for k, key in enumerate(out_keys):
-                axs[i][k].plot(self.approxs[i].T[0], self.approxs[i].T[k + 1], label = "Approximation")
-                axs[i][k].plot(self.gts[i].T[0], self.gts[i].T[k + 1], label = "Ground Truth")
+                axs[i][k].plot(self.approxs[ind].T[0], self.approxs[ind].T[k + 1], label = "Approximation", marker = "o")
+                axs[i][k].plot(self.gts[ind].T[0], self.gts[ind].T[k + 1], label = "Ground Truth", marker = "o")
+
+                if meta:
+                    for j, n in enumerate(self.neighbors[ind]):
+
+                        axs[i][k].plot(n.T[0], n.T[k + 1], color = colors[j], alpha = 0.5, marker = "o")
+                
                 axs[i][k].legend()
 
                 if i == len(inds) - 1:
                     axs[i][k].set_xlabel("Myr")
 
                 axs[i][k].set_ylabel(key)
+                error = np.array(self.errors["relative"][ind]).max()
+
+                title = f"{ind}, Err: {error:.2f}, Avg Dist: {np.array(self.distances[ind]).mean():.2f}" if meta else f"{ind}, Err: {error:.2f}"
+                axs[i][k].set_title(title)
 
         fig.suptitle(title)
 
@@ -412,6 +493,20 @@ class EvaluateTrackInterpolator:
         hi = int(len(errs) * min(percent + margin, 1.0))
 
         return errs[lo:hi]
+
+    def error_vs_dists(self, err_type = "relative"):
+
+        avg_err = [np.array(err).mean(axis = 0) for err in self.errors[err_type]]
+
+        avg_dist = self.distances.mean(axis = 1)
+
+        order = avg_dist.argsort()
+
+        print(avg_dist, np.array(avg_err).mean(axis = 1))
+
+        plt.plot(avg_dist[order], avg_err[order])
+
+
 
 
 

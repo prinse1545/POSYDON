@@ -627,6 +627,7 @@ class BaseIFInterpolator:
             self.interpolator = MC_Interpolator(
                 self.classifiers[self.c_key],
                 self.interp_classes, self.interp_method)
+
             self.interpolator.train(XTn, YTn, ic[self.valid > 0])
 
     def test_interpolator(self, Xt):
@@ -1140,11 +1141,13 @@ class MC_Interpolator:
             List of corresponding output vectors
 
         """
+
         self.M = YT.shape[1]
         for i in range(len(self.classes)):
             which = np.zeros_like(z, dtype=bool)
             for j in range(len(self.classes[i])):
                 which += z == self.classes[i][j]
+
             self.interpolators[i].train(XT[which, :], YT[which, :])
 
     def predict(self, Xt):
