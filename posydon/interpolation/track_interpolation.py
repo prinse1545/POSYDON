@@ -55,7 +55,7 @@ class TrackInterpolator:
                     self.phase == "HMS-HMS")
 
         # taking out systems that start in RLOF
-        valid_inds[np.where(grid.final_values["termination_flag_1"] == "forced_initial_RLO")[0]] = -1
+        valid_inds[np.where((grid.final_values["termination_flag_1"] == "forced_initial_RLO"))[0]] = -1
         valid_bool = lambda track: track.history1 is None or track.history2 is None or track.binary_history is None if self.phase == "HMS-HMS" else track.history1 is None or track.binary_history is None
         valid_inds[[ind for ind, track in enumerate(grid) if valid_bool(track)]] = -1
 
@@ -113,6 +113,7 @@ class TrackInterpolator:
         meta_data = []
 
         for _class, iv in zip(classes, initial_values):
+
             if meta:
                 a, m = self.method(iv, _class, meta)
 
@@ -163,9 +164,9 @@ class TrackInterpolator:
             app.T[0] = (app.T[0] / app.T[0].max()) * fkeys[self.out_keys.index("age")]
 
 
-        for key, value in zip(self.in_keys, initial_value):
-            if key in self.out_keys:
-                app[0][self.out_keys.index(key)] = value
+        # for key, value in zip(self.in_keys, initial_value):
+        #     if key in self.out_keys:
+        #         app[0][self.out_keys.index(key)] = value
 
         if self.max_interp is not None:
             y_max = self.max_interp.test_interpolator(np.array([initial_value]))[0]

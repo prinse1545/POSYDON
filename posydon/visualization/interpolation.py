@@ -279,6 +279,7 @@ class EvaluateTrackInterpolator:
         valid_inds[np.where(grid.final_values["termination_flag_1"] == "forced_initial_RLO")[0]] = -1
         valid_bool = lambda track: track.history1 is None or track.history2 is None or track.binary_history is None if interpolator.phase == "HMS-HMS" else track.history1 is None or track.binary_history is None
         valid_inds[[ind for ind, track in enumerate(grid) if valid_bool(track)]] = -1
+        # valid_inds[np.where(grid.final_values["interpolation_class"] == "initial_MT")[0]] = -1
 
         approxs, meta = interpolator.test_interpolator(ivs, True)
 
@@ -287,6 +288,7 @@ class EvaluateTrackInterpolator:
         self.neighbors = []
         self.distances = []
         self.gts = []
+        self.classes = []
 
 
         bhist_keys = [k for k in interpolator.out_keys if k.split("_")[0] != "S1" and k.split("_")[0] != "S2"]
@@ -362,6 +364,7 @@ class EvaluateTrackInterpolator:
 
             errors["relative"].append(r_errs)
             errors["absolute"].append(a_errs)
+            self.classes.append([grid.final_values["interpolation_class"][ind]] * r_errs.shape[0])
 
         self.approxs = np.array(self.approxs)
         self.neighbors = np.array(self.neighbors)
@@ -384,6 +387,7 @@ class EvaluateTrackInterpolator:
         self.errs = np.array(self.errs, dtype = np.float64)
 
         self.errs = self.errs[~np.isnan(self.errs).any(axis = 1)]
+        self.errs = self.errs[~np.isinf(self.errs).any(axis = 1)]
 
         plt.rcParams.update({"font.size": 18, "font.family": "Times New Roman"})
 
