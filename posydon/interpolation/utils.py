@@ -12,16 +12,15 @@ def set_valid(ic, X, classes, interp_in_q):
 
     valid = np.zeros(len(ic), dtype=int)
 
-    for flag in ['not_converged', 'ignored_no_BH', 'ignored_no_RLO']:
-        which = (ic == flag)
-        valid[which] = -1
-        print(f"Discarded {np.sum(which)} binaries with "
-                f"interpolation_class = [{flag}]")
+    invalid = np.where((ic == "not_converged") | (ic == "ignored_no_BH") | (ic == "ignored_no_RLO"))[0]
+    print(f"Disccarded {invalid.shape[0]} binaries")
+    valid[invalid] = -1
+    
 
     which = np.isnan(np.sum(X, axis=1))
     valid[which] = -1
     print(f"Discarded {np.sum(which)} binaries with nans in input values.")
-
+    
     for i, flag in enumerate(classes):
         valid[ic == flag] = i + 1
 

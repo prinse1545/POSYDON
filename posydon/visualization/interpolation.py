@@ -12,6 +12,8 @@ __authors__ = [
 from posydon.interpolation.utils import set_valid
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
+from itertools import compress
+from tqdm import tqdm
 import numpy as np
 import random
 
@@ -264,24 +266,25 @@ class EvaluateIFInterpolator:
 
 class EvaluateTrackInterpolator:
 
-    def __init__(self, interpolator, grid, rescale_y = True):
+    def __init__(self, interpolator, grid, rescale_y = True, parameter_wise = False):
 
         errors = {"relative": [], "absolute": []}
 
         ivs = np.array(grid.initial_values[interpolator.in_keys].tolist())
 
-        unique_classes = np.unique(grid.final_values["interpolation_class"])
+        unique_classes = ["stable_MT", "unstable_MT", "no_MT"]
 
         valid_inds = set_valid(grid.final_values["interpolation_class"], ivs, unique_classes,
             interpolator.phase == "HMS-HMS")
 
         # taking out systems that start in RLOF
-        valid_inds[np.where(grid.final_values["termination_flag_1"] == "forced_initial_RLO")[0]] = -1
+        valid_inds[np.where((grid.final_values["termination_flag_1"] == "forced_initial_RLO") | (grid.final_values["interpolation_class"] == "initial_MT"))[0]] = -1
         valid_bool = lambda track: track.history1 is None or track.history2 is None or track.binary_history is None if interpolator.phase == "HMS-HMS" else track.history1 is None or track.binary_history is None
         valid_inds[[ind for ind, track in enumerate(grid) if valid_bool(track)]] = -1
         # valid_inds[np.where(grid.final_values["interpolation_class"] == "initial_MT")[0]] = -1
 
         approxs, meta = interpolator.test_interpolator(ivs, True)
+        print(approxs.shape, valid_inds.shape, ivs.shape)
 
         tracks_omitted = 0
         self.approxs = []
@@ -289,11 +292,14 @@ class EvaluateTrackInterpolator:
         self.distances = []
         self.gts = []
         self.classes = []
+        self.kept_inds = []
 
 
         bhist_keys = [k for k in interpolator.out_keys if k.split("_")[0] != "S1" and k.split("_")[0] != "S2"]
         s1_keys = [k[3:] for k in interpolator.out_keys if k.split("_")[0] == "S1"]
         s2_keys = [k[3:] for k in interpolator.out_keys if k.split("_")[0] == "S2"]
+
+        mask = np.where(np.array([len(bhist_keys) > 0, len(s1_keys) > 0, len(s2_keys) > 0]) == True)[0]
 
         if interpolator.phase != "HMS-HMS" and len(s2_keys) > 0:
             keys = [k for k in interpolator.out_keys if k[3:] not in s2_keys] + s1_keys
@@ -306,7 +312,7 @@ class EvaluateTrackInterpolator:
         self.herror_tstep_count = np.zeros(len(keys) - 1)
         self.n_tstep = 0
 
-        for ind, v in enumerate(valid_inds):
+        for ind, v in tqdm(enumerate(valid_inds)):
             if v < 0:
                 continue
 
@@ -315,57 +321,106 @@ class EvaluateTrackInterpolator:
                 s1_hist = np.array(grid[ind].history1[s1_keys].tolist())
                 s2_hist = np.array(grid[ind].history2[s2_keys].tolist())
 
-                bhist = np.concatenate([bin_hist, s1_hist, s2_hist], axis = 1)
+                # to_concat = list(compress([bin_hist, s1_hist, s2_hist], mask))
+
+                # bhist = np.concatenate(to_concat, axis = 1)
+                bhist = np.hstack([bin_hist, s1_hist, s2_hist])
             else:
                 bin_hist = np.array(grid[ind].binary_history[bhist_keys].tolist())
                 s1_hist = np.array(grid[ind].history1[s1_keys].tolist())
 
-                bhist = np.concatenate([bin_hist, s1_hist], axis = 1)
+                to_concat = list(compress([bin_hist, s1_hist], mask))
+
+                bhist = np.concatenate(to_concat, axis = 1)
 
             appr = approxs[ind]
 
             if rescale_y:
 
                 # rescaling y using gt max
-                y_max = bhist.max(axis = 0)[1:]
-                appr.T[1:] = ((appr.T[1:].T / appr.max(axis = 0)[1:]) * y_max).T
-
-            self.approxs.append(appr)
-            self.neighbors.append(meta[ind][0])
-            self.distances.append(meta[ind][1])
-            self.gts.append(bhist)
+                y_final = bhist[-1][1:]
+                appr.T[1:] = ((appr.T[1:].T / appr[-1][1:]) * y_final).T
 
             if np.isnan(np.array(appr, dtype = np.float64)).any() == True or bhist.shape[0] < 2 or appr.shape[0] < 2 or appr.T[0].min() == appr.T[0].max():
+                # print(meta[ind].shape, np.isnan(meta[ind]).any(), np.average(meta[ind], axis = 0).shape, np.isnan(np.average(meta[ind], axis = 0)).any())
                 tracks_omitted += 1
                 continue
+            
+            self.approxs.append(appr)
+            self.neighbors.append(meta[ind])
+            self.distances.append(meta[ind])
+            self.gts.append(bhist)
 
-            if "period_days" in interpolator.out_keys:
+            gt_age = bhist[:, 0] # bhist.T[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8)
 
-                pd_ind = interpolator.out_keys.index("period_days")
+            r_errs = []
+            a_errs = []
 
-                appr.T[pd_ind] = np.log10(appr.T[pd_ind])
-                bhist.T[pd_ind] = np.log10(bhist.T[pd_ind])
+            if parameter_wise:
 
-            n_appr = (appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8)
+                for i, (age, param) in enumerate(zip(appr[0].T, appr[1].T)):
+                    n_appr = age # (age - age.min()) / (age.max() - age.min() + 1.0e-8)
+                    
+                    interp = interp1d(n_appr, param)
 
-            interp = interp1d((appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8), appr.T[1:])
+                    r = []
+                    a = []
 
-            r_errs = np.array([np.abs((interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8)) - tb[1:]) / tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8) < n_appr.max()])
-            a_errs = np.array([np.abs(interp((tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8)) - tb[1:]) for tb in bhist if (tb[0] - bhist.T[0].min()) / (bhist.T[0].max() - bhist.T[0].min() + 1.0e-8) < n_appr.max()])
+                    for _age, gt in zip(gt_age, bhist.T[i + 1]):
+                        if _age < n_appr.max() and _age > n_appr.min():
+                            r.append(np.abs((interp(_age) - gt) / gt))
+                            a.append(np.abs(interp(_age) - gt))
+                        elif _age > n_appr.min():
+                            r.append(np.abs((param[-1] - gt) / gt))
+                            a.append(np.abs(param[-1] - gt))
+                        else:
+                            r.append(np.abs((param[0] - gt) / gt))
+                            a.append(np.abs(param[0] - gt)) 
 
+                    r_errs.append(r)
+                    a_errs.append(a)
 
+                r_errs = np.array(r_errs).T
+                a_errs = np.array(a_errs).T
+                
+
+            else:
+
+                n_appr = appr.T[0] # (appr.T[0] - appr.T[0].min()) / (appr.T[0].max() - appr.T[0].min() + 1.0e-8)
+
+                interp = interp1d(n_appr, appr.T[1:])
+
+                for _age, tb in zip(gt_age, bhist):
+
+                    if _age < n_appr.max() and _age > n_appr.min():
+
+                        r_errs.append(np.abs((interp(_age) - tb[1:]) / tb[1:]))
+                        a_errs.append(np.abs(interp(_age) - tb[1:]))
+                    elif _age > n_appr.min():
+                        r_errs.append(np.abs(appr.T[1:].T[-1] - tb[1:]) / tb[1:])
+                        a_errs.append(np.abs(appr.T[1:].T[-1] - tb[1:]))
+                    else:
+                        r_errs.append(np.abs(appr.T[1:].T[0] - tb[1:]) / tb[1:])
+                        a_errs.append(np.abs(appr.T[1:].T[0] - tb[1:]))  
+
+            r_errs = np.array(r_errs)
+            a_errs = np.array(a_errs)
+
+            # collecting info about time steps and tracks above 10% error
             self.herror_track_count += (r_errs.mean(axis = 0) >= 0.1)
             self.herror_tstep_count += (r_errs >= 0.1).sum(axis = 0)
             self.n_tstep += bhist.shape[0]
             
-            # removing nans causes by duplicate ages in data
+            # removing nans caused by duplicate ages in data
             r_errs = r_errs[~np.isnan(r_errs).any(axis=1)]
             a_errs = a_errs[~np.isnan(a_errs).any(axis=1)]
+
+            self.kept_inds.append(ind)
 
             errors["relative"].append(r_errs)
             errors["absolute"].append(a_errs)
             self.classes.append([grid.final_values["interpolation_class"][ind]] * r_errs.shape[0])
-
+        
         self.approxs = np.array(self.approxs)
         self.neighbors = np.array(self.neighbors)
         self.distances = np.array(self.distances)
@@ -411,6 +466,7 @@ class EvaluateTrackInterpolator:
 
         axs.set_ylabel("Errors in Log 10 Scale")
         axs.grid(axis = "y", which = "both", alpha = 0.75, zorder = -100)
+        axs.set_ylim([-4, 1])
 
         for pc in parts["bodies"]:
             pc.set_facecolor("#D43F3A")
